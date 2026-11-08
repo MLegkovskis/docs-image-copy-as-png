@@ -1,0 +1,73 @@
+name: Package extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - manifest.json
+      - background.js
+      - content.js
+      - icons/**
+      - scripts/package-extension.sh
+      - .github/workflows/package-extension.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-extension-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate extension source
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.manifest_version == 3' manifest.json >/dev/null
+          node --check background.js
+          node --check content.js
+          test "$(jq -r '.permissions | sort | join(",")' manifest.json)" = "clipboardRead,clipboardWrite"
+          test "$(jq -r 'has("host_permissions")' manifest.json)" = "false"
+
+      - name: Build Chrome Web Store ZIP
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-extension.sh
+          package_path=$(scripts/package-extension.sh)
+          version=$(jq -r '.version' manifest.json)
+          echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-image-copy-as-png-${{ steps.build.outputs.version }}
+          path: ${{ steps.build.outputs.package_path }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create versioned GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
+          PACKAGE_PATH: ${{ steps.build.outputs.package_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists. Bump manifest.json version for code changes."
+            exit 1
+          fi
+          gh release create "$tag" "$PACKAGE_PATH" \
+            --title "Docs Image Copy as PNG ${tag}" \
+            --generate-notes
